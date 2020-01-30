@@ -1,0 +1,207 @@
+import numpy as np
+import pandas as pd
+from database_connector import DatabaseConnector
+
+
+class DataFeeder():
+    """
+    This class reads and returns data from the database
+    """
+
+    def __init__(self):
+        """
+        Initialization. Uses DatabaseConnector class.
+        """
+        dbcon = DatabaseConnector('DatabaseName')
+        self.cur = dbcon.connect()
+        return self.cur
+
+
+class WaterDataFeeder(DataFeeder):
+    """This class reads water demand data"""
+
+    def __init__(self):
+        self._cur = DataFeeder.__init__(self)
+        self._flow = []
+        self._time = []
+        self._sectors = []
+
+    @property
+    def flows(self):
+        return self._flow
+
+    @property
+    def time(self):
+        return self._time
+
+    @property
+    def sectors(self):
+        return self._sectors
+
+    def bucket(self, bucket_size, sector, date_begin = '2019-01-01', date_end = '2019-12-31'):
+        """
+        Aggregates data into buckets
+        :param bucket_size: size of aggregation window in minutes (int)
+        :param date_begin: date to start from (string YYYY-MM-DD)
+        :param date_end: date to end with (string YYYY-MM-DD)
+        :param sector: sector identifier
+        """
+        self._cur.execute("""SELECT time_bucket('%s minutes', time) as interval, avg(flow), sector
+        FROM water 
+        WHERE time >= %s and time < %s and sector = %s AND flow > 0 and flow < 500
+        GROUP BY interval, sector
+        ORDER by interval""",[bucket_size,date_begin,date_end, str(sector)])
+
+        fetched = np.array(self._cur.fetchall()).reshape(-1,3)
+        self._flow = fetched[:,1]
+        self._time = fetched[:,0]
+        self._sectors = fetched[:,2]
+
+    def to_df(self):
+        """
+        Converts data to DataFrame
+        :return: DataFrame
+        """
+        flows = np.array(self._flow, dtype=float).reshape(-1,1)
+        time = np.array(self._time).reshape(-1,1)
+        time = [t[0].replace(tzinfo=None) for t in time]
+        df = pd.DataFrame(flows, index=time, columns=['flow'])
+        df.index = pd.to_datetime(df.index, utc=True)
+        return df
+
+
+class WeatherDataFeeder(DataFeeder):
+    """This class reads and feeds weather data"""
+
+    def __init__(self):
+        self._cur = DataFeeder.__init__(self)
+        self._stationids = []
+        self._time = []
+        self._temperatures = []
+        self._pressures = []
+        self._rhs = []
+        self._sectors = []
+
+    @property
+    def stationid(self):
+        return self._stationids
+
+    @property
+    def time(self):
+        return self._time
+
+    @property
+    def temperatures(self):
+        return self._temperatures
+
+    @property
+    def pressures(self):
+        return self._pressures
+
+    @property
+    def rhs(self):
+        return self._rhs
+
+    @property
+    def sectors(self):
+        return self._sectors
+
+    def bucket(self, bucket_size, sector, date_begin = '2019-01-01', date_end = '2019-12-31'):
+        """
+        :param bucket_size: size of aggregation window in minutes (int)
+        :param sector: sector identifier
+        :param date_begin: date to start from (string YYYY-MM-DD)
+        :param date_end: date to end with (string YYYY-MM-DD)
+        """
+        self._cur.execute("""SELECT time_bucket('%s minutes', time) as interval, avg(temp), avg(pressure),
+        avg(rh), sector 
+        FROM weather
+        WHERE time >= %s and time <= %s and sector = %s
+        GROUP BY interval, sector
+        ORDER by interval""",[bucket_size, date_begin, date_end, str(sector)])
+
+        fetched = np.array(self._cur.fetchall()).reshape(-1,5)
+        self._time = fetched[:, 0]
+        self._temperatures = fetched[:,1]
+        self._pressures = fetched[:,2]
+        self._rhs = fetched[:,3]
+        self._sectors = fetched[:,4]
+
+
+class GeoDataFeeder(DataFeeder):
+    """This class reads and feeds the geolocated data"""
+
+    def __init__(self):
+        self._cur = DataFeeder.__init__(self)
+        self._time = []
+        self._coordinates = []
+        self._ids = []
+        self._sectors = []
+        self._counts = []
+
+    @property
+    def coordinates(self):
+        return self._coordinates
+
+    @property
+    def time(self):
+        return self._time
+
+    @property
+    def ids(self):
+        return self._ids
+
+    @property
+    def sectors(self):
+        return self._sectors
+
+    @property
+    def counts(self):
+        return  self._counts
+
+    def raw_data(self, sector, date_begin='2019-01-01', date_end='2019-12-31'):
+        """
+        Returns raw data
+        :param date_begin: date to start from (string YYYY-MM-DD)
+        :param date_end: date to end with (string YYYY-MM-DD)
+        :param sector: sector identifier
+        """
+        self._cur.execute("""SELECT time, lon, lat, id, sector 
+        FROM mobile WHERE time >= %s and time <= %s and sector = %s""",
+                               [date_begin,date_end, str(sector)])
+
+        fetched = np.array(self._cur.fetchall()).reshape(-1,5)
+
+        self._coordinates = fetched[:,1:3]
+        self._time = fetched[:,0]
+        self._ids = fetched[:,3]
+        self._sectors = fetched[:,4]
+
+    def agg_data(self, sector, date_begin='2019-01-01', date_end='2019-12-31'):
+        """
+        Aggregates the data by sector
+        :param date_begin: date to start from (string YYYY-MM-DD)
+        :param date_end: date to end with (string YYYY-MM-DD)
+        :param sector: sector identifier
+        """
+        self._cur.execute("""SELECT COUNT(*), date_trunc('hour',time) FROM mobile
+        WHERE time >= %s and time < %s and sector = %s
+        GROUP by date_trunc('hour',time)
+        ORDER by date_trunc('hour',time)""", [date_begin, date_end, str(sector)])
+
+        fetched = np.array(self._cur.fetchall()).reshape(-1,2)
+
+        self._time = fetched[:,1]
+        self._counts = fetched[:,0]
+
+    def to_df(self):
+        """
+         Converts data to DataFrame
+         :return: DataFrame
+        """
+        counts = np.array(self._counts, dtype=int).reshape(-1,1)
+        time = np.array(self._time).reshape(-1,1)
+        time = [t[0].replace(tzinfo=None) for t in time]
+        df = pd.DataFrame(counts, index = time, columns=['count'])
+        df.index = pd.to_datetime(df.index,utc=True)
+        return df
